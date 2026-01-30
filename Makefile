@@ -20,12 +20,16 @@ $(STAGE2_BIN): $(BOOT_DIR)/stage2.asm | $(BUILD_DIR)
 	$(NASM) -f bin $< -o $@
 
 $(IMG): $(MBR_BIN) $(STAGE2_BIN)
-	dd if=/dev/zero of=$(IMG) bs=512 count=2880 status=none
-	dd if=$(MBR_BIN) of=$(IMG) bs=512 count=1 conv=notrunc status=none
-	dd if=$(STAGE2_BIN) of=$(IMG) bs=512 seek=1 conv=notrunc status=none
+	@echo "Создаём образ диска $(IMG)..."
+	# Создаём пустой диск 1.44MB
+	truncate -s $$(expr 512 \* 2880) $(IMG)
+	# Записываем MBR
+	dd if=$(MBR_BIN) of=$(IMG) bs=512 count=1 conv=notrunc status=progress
+	# Записываем stage2 после MBR
+	dd if=$(STAGE2_BIN) of=$(IMG) bs=512 seek=1 conv=notrunc status=progress
 
 run: $(IMG)
-	$(QEMU) -hda $(IMG) -boot a
+	$(QEMU) -drive file=$(IMG),format=raw -boot a
 
 clean:
 	rm -rf $(BUILD_DIR)
