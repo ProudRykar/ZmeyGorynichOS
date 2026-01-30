@@ -33,6 +33,7 @@ start:
 ; PROTECTED MODE (32-bit)
 ; ================================
 [bits 32]
+
 pm_entry:
     ; set data segments
     mov ax, 0x10
@@ -56,23 +57,24 @@ pm_entry:
 
     sti
 
-    ; test output in VGA
+    ; --- print PM message to VGA (execute BEFORE hlt-loop) ---
     mov esi, msg_pm
     mov edi, 0xB8000
-    
 .print:
     lodsb
     test al, al
-    jz .halt
+    jz .after_print
     mov [edi], al
     mov byte [edi+1], 0x07
     add edi, 2
     jmp .print
+.after_print:
 
-.halt:
-    cli
+    ; enter low-power loop — timer IRQ will wake CPU and ISR покажет тик
+.hlt_loop:
     hlt
-    jmp .halt
+    jmp .hlt_loop
+
 
 
 ; ================================
@@ -280,30 +282,46 @@ ISR_NOERR 47
 ; Stack at entry: [vector][error_code][EIP][CS][EFLAGS]...
 ; We will read vector & error_code, show simple marker in VGA, then remove pushed dwords and iret.
 ; ================================
+
+align 4
+tick_count dd 0
 isr_common:
-    ; read pushed values (vector and error)
-    mov eax, [esp]       ; vector
-    mov ebx, [esp + 4]   ; error code
+    ; stack:
+    ; [esp+0]  vector
+    ; [esp+4]  error code
 
     pusha
 
-    ; simple VGA marker: write '!' at row 0 col 40 + vector (clamped)
-    mov edi, 0xB8000
-    ; write at fixed offset (for debug)
-    add edi, 160
-    mov byte [edi], '!'
-    mov byte [edi+1], 0x4F
+    mov eax, [esp + 32]    ; vector (pusha = 8 регистров = 32 байта)
 
+    cmp eax, 32
+    jne .skip_timer
+
+    ; --- IRQ0: timer ---
+    inc dword [tick_count]
+
+    ; вывести младшую цифру тиков
+    mov edi, 0xB8000 + 2*80*1
+    mov eax, [tick_count]
+    xor edx, edx
+    mov ecx, 10
+    div ecx
+    add dl, '0'
+    mov [edi], dl
+    mov byte [edi+1], 0x0A
+
+.skip_timer:
     popa
 
-    ; remove the two dwords we pushed in stub (vector and error_code)
-    add esp, 8
+    add esp, 8             ; убрать vector + error
 
+    ; EOI PIC
     mov al, 0x20
     out 0x20, al
     out 0xA0, al
 
     iret
+
 
 
 ; ================================
