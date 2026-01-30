@@ -47,7 +47,7 @@ disk_error:
 dap:
     db 0x10           ; size of DAP structure (16)
     db 0x00           ; reserved
-    dw 0x0002         ; <-- исправлено: читаем 2 сектора (stage2)
+    dw 0x0020         ; <-- исправлено: читаем 2 сектора (stage2)
     dw 0x8000         ; buffer offset (0x8000)
     dw 0x0000         ; buffer segment (0x0000) -> phys 0x0000:0x8000
     dq 0x0000000000000001  ; starting LBA = 1
