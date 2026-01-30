@@ -46,6 +46,9 @@ pm_entry:
     ; stack
     mov esp, 0x009F000
 
+    ; init keyboard cursor (вторая строка)
+    mov dword [kbd_pos], 0xB8000 + 2*80*2
+    
     ; remap PIC
     call pic_remap
 
@@ -55,9 +58,13 @@ pm_entry:
     ; load IDT
     lidt [idtr]
 
+    ; initialize keyboard cursor (start of 3rd text row) and clear shift flags
+    mov dword [kbd_pos], 0x000B8140    ; 0xB8000 + 2*80*2 = 0xB8140
+    mov dword [shift_flags], 0
+
     sti
 
-    ; --- print PM message to VGA (execute BEFORE hlt-loop) ---
+    ; --- print PM message to VGA (first row) ---
     mov esi, msg_pm
     mov edi, 0xB8000
 .print:
@@ -70,11 +77,10 @@ pm_entry:
     jmp .print
 .after_print:
 
-    ; enter low-power loop — timer IRQ will wake CPU and ISR покажет тик
+    ; enter low-power loop — IRQs will wake CPU
 .hlt_loop:
     hlt
     jmp .hlt_loop
-
 
 
 ; ================================
@@ -104,17 +110,16 @@ pic_remap:
     out 0xA1, al
     ret
 
-    
+
 ; ================================
-; IDT memory & handlers (data)
+; IDT memory & handlers
 ; ================================
 [bits 32]
 align 8
-idt_space:               ; space for 48 entries (0..47) * 8 bytes
+idt_space:
     times 48*8 db 0
 idt_end:
 
-; table of handler addresses (dd isrX)
 align 4
 idt_handlers:
     dd isr0
@@ -166,7 +171,6 @@ idt_handlers:
     dd isr46
     dd isr47
 
-; IDTR (limit + base)
 align 4
 idtr:
     dw idt_end - idt_space - 1
@@ -174,42 +178,32 @@ idtr:
 
 
 ; ================================
-; Fill IDT routine (32-bit)
-; Copies handlers from idt_handlers (dd) into idt_space entries:
-; layout per entry: dw offset_low, dw selector, db 0, db flags, dw offset_high
+; Fill IDT routine
 ; ================================
 fill_idt_from_handlers:
     pushad
-
-    mov esi, idt_space       ; destination pointer (byte)
-    mov ebx, idt_handlers    ; source pointer (dd list)
-    mov ecx, 48              ; number of entries
-
+    mov esi, idt_space
+    mov ebx, idt_handlers
+    mov ecx, 48
 .fill_loop:
-    mov eax, [ebx]           ; handler address
-    mov ax, ax               ; ensure ax is low word (no-op to satisfy assembler)
-    mov word [esi], ax       ; offset low (word)
-    mov word [esi+2], 0x08   ; selector (code)
-    mov byte [esi+4], 0      ; zero
-    mov byte [esi+5], 0x8E   ; flags: present, DPL=0, 32-bit interrupt gate
+    mov eax, [ebx]
+    mov word [esi], ax
+    mov word [esi+2], 0x08
+    mov byte [esi+4], 0
+    mov byte [esi+5], 0x8E
     mov edx, eax
     shr edx, 16
-    mov dx, dx
-    mov word [esi+6], dx     ; offset high
+    mov word [esi+6], dx
     add esi, 8
     add ebx, 4
     dec ecx
     jnz .fill_loop
-
     popad
     ret
 
 
 ; ================================
-; ISR STUBS (32-bit)
-; For exceptions with error code: 8,10,11,12,13,14,17 -> we use ISR_ERR
-; Others use ISR_NOERR (push fake 0 error)
-; Each stub pushes error (or fake) and vector number, then jumps to common handler.
+; ISR STUBS
 ; ================================
 %macro ISR_NOERR 1
 isr%1:
@@ -278,29 +272,153 @@ ISR_NOERR 47
 
 
 ; ================================
-; ISR common handler (32-bit)
-; Stack at entry: [vector][error_code][EIP][CS][EFLAGS]...
-; We will read vector & error_code, show simple marker in VGA, then remove pushed dwords and iret.
+; ISR common handler
 ; ================================
-
 align 4
 tick_count dd 0
+kbd_pos   dd 0
+
+align 4
+shift_flags dd 0   ; бит 0 = левый Shift, бит 1 = правый Shift
+
+; full scancode → ASCII (set1, US layout)
+align 4
+kbd_map:
+    db 0    ; 0x00 — нет клавиши
+    db 27   ; 0x01 — ESC
+    db '1'  ; 0x02
+    db '2'  ; 0x03
+    db '3'  ; 0x04
+    db '4'  ; 0x05
+    db '5'  ; 0x06
+    db '6'  ; 0x07
+    db '7'  ; 0x08
+    db '8'  ; 0x09
+    db '9'  ; 0x0A
+    db '0'  ; 0x0B
+    db '-'  ; 0x0C
+    db '='  ; 0x0D
+    db 8    ; 0x0E — Backspace
+    db 9    ; 0x0F — Tab
+    db 'q'  ; 0x10
+    db 'w'  ; 0x11
+    db 'e'  ; 0x12
+    db 'r'  ; 0x13
+    db 't'  ; 0x14
+    db 'y'  ; 0x15
+    db 'u'  ; 0x16
+    db 'i'  ; 0x17
+    db 'o'  ; 0x18
+    db 'p'  ; 0x19
+    db '['  ; 0x1A
+    db ']'  ; 0x1B
+    db 10   ; 0x1C — Enter
+    db 0    ; 0x1D — Ctrl
+    db 'a'  ; 0x1E
+    db 's'  ; 0x1F
+    db 'd'  ; 0x20
+    db 'f'  ; 0x21
+    db 'g'  ; 0x22
+    db 'h'  ; 0x23
+    db 'j'  ; 0x24
+    db 'k'  ; 0x25
+    db 'l'  ; 0x26
+    db ';'  ; 0x27
+    db 39  ; 0x28
+    db '`'  ; 0x29
+    db 0    ; 0x2A — Left Shift
+    db '\'  ; 0x2B
+    db 'z'  ; 0x2C
+    db 'x'  ; 0x2D
+    db 'c'  ; 0x2E
+    db 'v'  ; 0x2F
+    db 'b'  ; 0x30
+    db 'n'  ; 0x31
+    db 'm'  ; 0x32
+    db ','  ; 0x33
+    db '.'  ; 0x34
+    db '/'  ; 0x35
+    db 0    ; 0x36 — Right Shift
+    db '*'  ; 0x37 — Keypad *
+    db 0    ; 0x38 — Alt
+    db ' '  ; 0x39 — Space
+    ; остальные коды можно заполнить нулями или соответствующими символами
+align 4
+kbd_map_shift:
+    db 0    ; 0x00 — нет клавиши
+    db 27   ; 0x01 — ESC
+    db '!'  ; 0x02
+    db '@'  ; 0x03
+    db '#'  ; 0x04
+    db '$'  ; 0x05
+    db '%'  ; 0x06
+    db '^'  ; 0x07
+    db '&'  ; 0x08
+    db '*'  ; 0x09
+    db '('  ; 0x0A
+    db ')'  ; 0x0B
+    db '_'  ; 0x0C
+    db '+'  ; 0x0D
+    db 8    ; 0x0E — Backspace
+    db 9    ; 0x0F — Tab
+    db 'Q'  ; 0x10
+    db 'W'  ; 0x11
+    db 'E'  ; 0x12
+    db 'R'  ; 0x13
+    db 'T'  ; 0x14
+    db 'Y'  ; 0x15
+    db 'U'  ; 0x16
+    db 'I'  ; 0x17
+    db 'O'  ; 0x18
+    db 'P'  ; 0x19
+    db '{'  ; 0x1A
+    db '}'  ; 0x1B
+    db 10   ; 0x1C — Enter
+    db 0    ; 0x1D — Ctrl
+    db 'A'  ; 0x1E
+    db 'S'  ; 0x1F
+    db 'D'  ; 0x20
+    db 'F'  ; 0x21
+    db 'G'  ; 0x22
+    db 'H'  ; 0x23
+    db 'J'  ; 0x24
+    db 'K'  ; 0x25
+    db 'L'  ; 0x26
+    db ':'  ; 0x27
+    db '"'  ; 0x28
+    db '~'  ; 0x29
+    db 0    ; 0x2A — Left Shift
+    db '|'  ; 0x2B
+    db 'Z'  ; 0x2C
+    db 'X'  ; 0x2D
+    db 'C'  ; 0x2E
+    db 'V'  ; 0x2F
+    db 'B'  ; 0x30
+    db 'N'  ; 0x31
+    db 'M'  ; 0x32
+    db '<'  ; 0x33
+    db '>'  ; 0x34
+    db '?'  ; 0x35
+    db 0    ; 0x36 — Right Shift
+    db '*'  ; 0x37
+    db 0    ; 0x38 — Alt
+    db ' '  ; 0x39
+
+
 isr_common:
-    ; stack:
-    ; [esp+0]  vector
-    ; [esp+4]  error code
-
     pusha
+    mov eax, [esp + 32]  ; vector
 
-    mov eax, [esp + 32]    ; vector (pusha = 8 регистров = 32 байта)
-
+    ; -------- IRQ0: timer --------
     cmp eax, 32
-    jne .skip_timer
+    je timer_irq
+    ; -------- IRQ1: keyboard --------
+    cmp eax, 33
+    je keyboard_irq
+    jmp skip_irq
 
-    ; --- IRQ0: timer ---
+timer_irq:
     inc dword [tick_count]
-
-    ; вывести младшую цифру тиков
     mov edi, 0xB8000 + 2*80*1
     mov eax, [tick_count]
     xor edx, edx
@@ -309,19 +427,83 @@ isr_common:
     add dl, '0'
     mov [edi], dl
     mov byte [edi+1], 0x0A
+    jmp skip_irq
 
-.skip_timer:
+keyboard_irq:
+    in al, 0x60
+    mov ah, al
+    test al, 0x80
+    jnz key_release
+    ; --- key press ---
+    movzx eax, al
+    cmp eax, 0x3F
+    ja kbd_done
+    ; special: Left Shift = 0x2A, Right Shift = 0x36
+    cmp eax, 0x2A
+    je shift_left_down
+    cmp eax, 0x36
+    je shift_right_down
+    ; обычная клавиша
+    mov bl, [shift_flags]
+    test bl, 3        ; проверка битов Shift
+    jz use_normal
+    mov al, [kbd_map_shift + eax]
+    jmp write_char
+
+use_normal:
+    mov al, [kbd_map + eax]
+
+write_char:
+    cmp al, 0
+    je kbd_done
+
+    mov edi, [kbd_pos]    ; загружаем текущую позицию
+    test edi, edi
+    jnz have_pos          ; если != 0 — используем её
+    mov edi, 0xB8000 + 2*80*2   ; иначе — стартовая позиция (вторая строка)
+have_pos:
+    mov [edi], al
+    mov byte [edi+1], 0x0F
+    add edi, 2
+    cmp edi, 0xB8000 + 2*80*3
+    jb no_wrap
+    mov edi, 0xB8000 + 2*80*2
+no_wrap:
+    mov [kbd_pos], edi
+
+kbd_done:
+    nop
+    jmp skip_irq
+
+key_release:
+    movzx eax, ah
+    ; release Shift
+    cmp eax, 0xAA
+    je shift_left_up
+    cmp eax, 0xB6
+    je shift_right_up
+    jmp kbd_done
+
+shift_left_down:
+    or dword [shift_flags], 1
+    jmp kbd_done
+shift_left_up:
+    and dword [shift_flags], 0xFFFFFFFE
+    jmp kbd_done
+shift_right_down:
+    or dword [shift_flags], 2
+    jmp kbd_done
+shift_right_up:
+    and dword [shift_flags], 0xFFFFFFFD
+    jmp kbd_done
+
+skip_irq:
     popa
-
-    add esp, 8             ; убрать vector + error
-
-    ; EOI PIC
+    add esp, 8
     mov al, 0x20
     out 0x20, al
     out 0xA0, al
-
     iret
-
 
 
 ; ================================
@@ -330,22 +512,20 @@ isr_common:
 [bits 16]
 align 8
 gdt_start:
-    dq 0x0000000000000000        ; NULL
-    dq 0x00CF9A000000FFFF        ; code
-    dq 0x00CF92000000FFFF        ; data
+    dq 0x0000000000000000
+    dq 0x00CF9A000000FFFF
+    dq 0x00CF92000000FFFF
 gdt_end:
 
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-
 ; ================================
-; MESSAGES & BIOS PRINT (16-bit)
+; MESSAGES & BIOS PRINT
 ; ================================
 [bits 16]
 msg_before_pm db "Entering protected mode",0
-
 [bits 32]
 msg_pm db "PM + IDT OK",0
 
