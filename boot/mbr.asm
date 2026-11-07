@@ -9,35 +9,36 @@ start:
     mov es, ax
     mov ss, ax
     mov sp, 0x7C00
+    cld
+
+    ; Сохраняем номер загрузочного диска BIOS
+    mov [boot_drive], dl
 
     ; --- Debug перед int13h ---
     mov si, msg_before_int13
     call print_string
 
-    ; === ИЗМЕНЕНИЕ НАЧАЛО: правильная подготовка DAP и вызов INT13h ===
+    ; === Загрузка Stage 2 через BIOS INT 13h Extensions ===
     lea si, [dap]
-    mov ah, 0x42         ; EXT_READ
-    ; DL содержит номер диска от BIOS — не перезаписываем
+    mov ah, 0x42
+    mov dl, [boot_drive]
     int 0x13
     jc disk_error
-    ; === ИЗМЕНЕНИЕ КОНЕЦ ===
 
     ; --- Debug после int13h ---
     mov si, msg_after_int13
     call print_string
 
-    ; Перепрыгиваем на stage2 (должен быть загружен в phys 0x8000)
+    ; Восстанавливаем номер диска
+    mov dl, [boot_drive]
+
+    ; Перепрыгиваем на Stage 2 (phys 0x8000)
     jmp 0x0000:0x8000
 
 disk_error:
     mov si, disk_err
-.print_err:
-    lodsb
-    or al, al
-    jz .hang
-    mov ah, 0x0E
-    int 0x10
-    jmp .print_err
+    call print_string
+
 .hang:
     cli
     hlt
@@ -45,25 +46,29 @@ disk_error:
 
 ; ================= DAP =================
 dap:
-    db 0x10           ; size of DAP structure (16)
-    db 0x00           ; reserved
-    dw 0x0020         ; <-- исправлено: читаем 2 сектора (stage2)
-    dw 0x8000         ; buffer offset (0x8000)
-    dw 0x0000         ; buffer segment (0x0000) -> phys 0x0000:0x8000
-    dq 0x0000000000000001  ; starting LBA = 1
+    db 0x10
+    db 0x00
+    dw 32             ; 32 сектора = 16 KiB Stage 2
+    dw 0x8000         ; Buffer offset
+    dw 0x0000         ; Buffer segment
+    dq 1              ; Starting LBA
 
-disk_err db "Disk load error (INT 13h)",0
-msg_before_int13 db "DEBUG: before int13h",0
-msg_after_int13 db "DEBUG: after int13h",0
+boot_drive db 0
+
+disk_err db "Disk load error (INT 13h)", 13, 10, 0
+msg_before_int13 db "DEBUG: before int13h", 13, 10, 0
+msg_after_int13 db "DEBUG: after int13h", 13, 10, 0
 
 ; ================= print_string =================
 print_string:
     lodsb
     or al, al
     jz .done
+
     mov ah, 0x0E
     int 0x10
     jmp print_string
+
 .done:
     ret
 
